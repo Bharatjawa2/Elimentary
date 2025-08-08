@@ -1,77 +1,68 @@
 const express = require('express');
 const router = express.Router();
 const BalanceSheet = require('../models/BalanceSheet');
-const Company = require('../models/Company');
 const { protect, authorizeCompanyAccess } = require('../middleware/auth');
-const { generateComparativeAnalysis, analyzeFinancialData } = require('../utils/geminiAI');
+const { generateComparativeAnalysis } = require('../utils/geminiAI');
 
-// @desc    Generate comparative analysis for multiple years
+// @desc    Compare multiple balance sheets
 // @route   POST /api/analysis/compare
 // @access  Private
 router.post('/compare', protect, async (req, res) => {
   try {
-    const { companyId, years, analysisType = 'comprehensive' } = req.body;
+    const { balanceSheetIds, analysisType = 'comprehensive' } = req.body;
 
-    // Validate company access
-    const company = await Company.findById(companyId);
-    if (!company) {
-      return res.status(404).json({
+    if (!balanceSheetIds || balanceSheetIds.length < 2) {
+      return res.status(400).json({
         success: false,
-        message: 'Company not found'
+        message: 'At least 2 balance sheets are required for comparison'
       });
     }
 
-    // Check if user has access to this company
-    if (req.user.role !== 'Group Executive' && 
-        req.user.company.toString() !== companyId && 
-        req.user.parentCompany?.toString() !== companyId) {
-      return res.status(403).json({
-        success: false,
-        message: 'Access denied to this company'
-      });
-    }
-
-    // Get balance sheets for the specified years
+    // Get balance sheets with extracted data
     const balanceSheets = await BalanceSheet.find({
-      company: companyId,
-      financialYear: { $in: years }
-    }).sort({ financialYear: 1 });
+      _id: { $in: balanceSheetIds }
+    }).populate('company', 'name');
 
     if (balanceSheets.length < 2) {
       return res.status(400).json({
         success: false,
-        message: 'At least 2 years of data are required for comparative analysis'
+        message: 'Could not find the specified balance sheets'
       });
     }
 
-    // Prepare data for analysis
-    const analysisData = balanceSheets.map(bs => ({
-      year: bs.financialYear,
-      data: bs.extractedData,
-      analysis: bs.analysis
+    // Check if user has access to all companies
+    for (const sheet of balanceSheets) {
+      if (req.user.role !== 'Group Executive' && 
+          req.user.company.toString() !== sheet.company._id.toString() && 
+          req.user.parentCompany?.toString() !== sheet.company._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied to one or more balance sheets'
+        });
+      }
+    }
+
+    // Prepare data for comparison
+    const comparisonData = balanceSheets.map(sheet => ({
+      year: sheet.financialYear,
+      company: sheet.company.name,
+      data: sheet.extractedData,
+      analysis: sheet.analysis
     }));
 
-    // Generate comparative analysis
-    const analysis = await generateComparativeAnalysis(analysisData);
+    // Generate comparative analysis using AI
+    const analysis = await generateComparativeAnalysis(comparisonData);
 
     res.json({
       success: true,
       message: 'Comparative analysis generated successfully',
       data: {
-        company: company.name,
-        years,
-        analysis: analysis.analysis,
-        trends: analysis.trends,
-        projections: analysis.projections,
-        balanceSheets: balanceSheets.map(bs => ({
-          id: bs._id,
-          year: bs.financialYear,
-          data: bs.extractedData
-        }))
+        analysis,
+        balanceSheets: comparisonData
       }
     });
   } catch (error) {
-    console.error('Comparative analysis error:', error);
+    console.error('Compare analysis error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to generate comparative analysis',
@@ -80,319 +71,523 @@ router.post('/compare', protect, async (req, res) => {
   }
 });
 
-// @desc    Generate financial ratios report
+// @desc    Get financial ratios for a company
 // @route   GET /api/analysis/ratios/:companyId
 // @access  Private
-router.get('/ratios/:companyId', protect, authorizeCompanyAccess, async (req, res) => {
+router.get('/ratios/:companyId', protect, async (req, res) => {
   try {
     const { companyId } = req.params;
     const { year } = req.query;
 
     const query = { company: companyId };
-    if (year) {
-      query.financialYear = year;
-    }
+    if (year) query.financialYear = year;
 
     const balanceSheets = await BalanceSheet.find(query)
-      .sort({ financialYear: -1 })
-      .limit(5); // Get last 5 years
+      .populate('company', 'name')
+      .sort({ financialYear: -1 });
 
     if (balanceSheets.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'No balance sheet data found for this company'
+        message: 'No balance sheets found for this company'
       });
     }
 
-    // Calculate ratios for each year
-    const ratios = balanceSheets.map(bs => {
-      const data = bs.extractedData;
-      
+    // Calculate financial ratios
+    const ratios = balanceSheets.map(sheet => {
+      const data = sheet.extractedData;
+      if (!data) return null;
+
+      const currentAssets = data.balanceSheet?.currentAssets || 0;
+      const currentLiabilities = data.balanceSheet?.currentLiabilities || 1;
+      const totalAssets = data.balanceSheet?.totalAssets || 0;
+      const totalLiabilities = data.balanceSheet?.totalLiabilities || 0;
+      const totalEquity = data.balanceSheet?.totalEquity || 1;
+      const inventory = data.balanceSheet?.inventory || 0;
+
       return {
-        year: bs.financialYear,
-        ratios: {
-          currentRatio: data.currentAssets / data.currentLiabilities || 0,
-          quickRatio: (data.currentAssets - data.inventory) / data.currentLiabilities || 0,
-          debtToEquityRatio: data.totalLiabilities / data.totalEquity || 0,
-          workingCapital: data.currentAssets - data.currentLiabilities,
-          assetTurnover: data.totalAssets > 0 ? 1 / data.totalAssets : 0,
-          returnOnEquity: data.totalEquity > 0 ? (data.totalAssets - data.totalLiabilities) / data.totalEquity : 0
-        },
-        data: {
-          totalAssets: data.totalAssets,
-          totalLiabilities: data.totalLiabilities,
-          totalEquity: data.totalEquity,
-          currentAssets: data.currentAssets,
-          currentLiabilities: data.currentLiabilities
-        }
+        year: sheet.financialYear,
+        currentRatio: currentAssets / currentLiabilities,
+        quickRatio: (currentAssets - inventory) / currentLiabilities,
+        debtToEquity: totalLiabilities / totalEquity,
+        debtToAssets: totalLiabilities / totalAssets,
+        equityRatio: totalEquity / totalAssets,
+        workingCapital: currentAssets - currentLiabilities
       };
-    });
+    }).filter(Boolean);
 
     res.json({
       success: true,
       data: {
-        ratios,
-        summary: {
-          totalYears: ratios.length,
-          latestYear: ratios[0]?.year,
-          oldestYear: ratios[ratios.length - 1]?.year
-        }
+        ratios
       }
     });
   } catch (error) {
-    console.error('Financial ratios error:', error);
+    console.error('Get ratios error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to generate financial ratios',
+      message: 'Failed to get financial ratios',
       error: error.message
     });
   }
 });
 
-// @desc    Generate growth analysis
+// @desc    Get growth analysis for a company
 // @route   GET /api/analysis/growth/:companyId
 // @access  Private
-router.get('/growth/:companyId', protect, authorizeCompanyAccess, async (req, res) => {
+router.get('/growth/:companyId', protect, async (req, res) => {
   try {
     const { companyId } = req.params;
-    const { years = 5 } = req.query;
 
     const balanceSheets = await BalanceSheet.find({ company: companyId })
-      .sort({ financialYear: -1 })
-      .limit(parseInt(years));
+      .populate('company', 'name')
+      .sort({ financialYear: 1 });
 
     if (balanceSheets.length < 2) {
       return res.status(400).json({
         success: false,
-        message: 'At least 2 years of data are required for growth analysis'
+        message: 'At least 2 balance sheets are required for growth analysis'
       });
     }
 
     // Calculate growth rates
     const growthData = [];
-    for (let i = 0; i < balanceSheets.length - 1; i++) {
-      const current = balanceSheets[i].extractedData;
-      const previous = balanceSheets[i + 1].extractedData;
-      
-      const growth = {
-        year: balanceSheets[i].financialYear,
-        previousYear: balanceSheets[i + 1].financialYear,
-        metrics: {
-          assetGrowth: ((current.totalAssets - previous.totalAssets) / previous.totalAssets) * 100,
-          liabilityGrowth: ((current.totalLiabilities - previous.totalLiabilities) / previous.totalLiabilities) * 100,
-          equityGrowth: ((current.totalEquity - previous.totalEquity) / previous.totalEquity) * 100,
-          currentAssetGrowth: ((current.currentAssets - previous.currentAssets) / previous.currentAssets) * 100,
-          currentLiabilityGrowth: ((current.currentLiabilities - previous.currentLiabilities) / previous.currentLiabilities) * 100
-        },
-        absolute: {
-          assetChange: current.totalAssets - previous.totalAssets,
-          liabilityChange: current.totalLiabilities - previous.totalLiabilities,
-          equityChange: current.totalEquity - previous.totalEquity
-        }
-      };
-      
-      growthData.push(growth);
+    for (let i = 1; i < balanceSheets.length; i++) {
+      const current = balanceSheets[i];
+      const previous = balanceSheets[i - 1];
+
+      const currentData = current.extractedData;
+      const previousData = previous.extractedData;
+
+      if (!currentData || !previousData) continue;
+
+      const currentAssets = currentData.balanceSheet?.totalAssets || 0;
+      const previousAssets = previousData.balanceSheet?.totalAssets || 0;
+      const currentRevenue = currentData.incomeStatement?.revenue || 0;
+      const previousRevenue = previousData.incomeStatement?.revenue || 0;
+      const currentEquity = currentData.balanceSheet?.totalEquity || 0;
+      const previousEquity = previousData.balanceSheet?.totalEquity || 0;
+
+      growthData.push({
+        year: current.financialYear,
+        assetGrowth: ((currentAssets - previousAssets) / previousAssets) * 100,
+        revenueGrowth: ((currentRevenue - previousRevenue) / previousRevenue) * 100,
+        equityGrowth: ((currentEquity - previousEquity) / previousEquity) * 100
+      });
     }
-
-    // Calculate compound annual growth rates
-    const firstYear = balanceSheets[balanceSheets.length - 1].extractedData;
-    const lastYear = balanceSheets[0].extractedData;
-    const yearsDiff = balanceSheets.length - 1;
-
-    const cagr = {
-      assets: Math.pow(lastYear.totalAssets / firstYear.totalAssets, 1 / yearsDiff) - 1,
-      liabilities: Math.pow(lastYear.totalLiabilities / firstYear.totalLiabilities, 1 / yearsDiff) - 1,
-      equity: Math.pow(lastYear.totalEquity / firstYear.totalEquity, 1 / yearsDiff) - 1
-    };
 
     res.json({
       success: true,
       data: {
-        growthData,
-        cagr,
-        summary: {
-          totalYears: balanceSheets.length,
-          period: `${balanceSheets[balanceSheets.length - 1].financialYear} - ${balanceSheets[0].financialYear}`
-        }
+        growth: growthData
       }
     });
   } catch (error) {
-    console.error('Growth analysis error:', error);
+    console.error('Get growth analysis error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to generate growth analysis',
+      message: 'Failed to get growth analysis',
       error: error.message
     });
   }
 });
 
-// @desc    Generate risk assessment
+// @desc    Get risk assessment for a company
 // @route   GET /api/analysis/risk/:companyId
 // @access  Private
-router.get('/risk/:companyId', protect, authorizeCompanyAccess, async (req, res) => {
+router.get('/risk/:companyId', protect, async (req, res) => {
   try {
     const { companyId } = req.params;
-    const { year } = req.query;
 
-    const query = { company: companyId };
-    if (year) {
-      query.financialYear = year;
-    }
-
-    const balanceSheets = await BalanceSheet.find(query)
+    const balanceSheets = await BalanceSheet.find({ company: companyId })
+      .populate('company', 'name')
       .sort({ financialYear: -1 })
-      .limit(3); // Get last 3 years for trend analysis
+      .limit(3);
 
     if (balanceSheets.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'No balance sheet data found for risk assessment'
+        message: 'No balance sheets found for risk assessment'
       });
     }
 
-    const latest = balanceSheets[0].extractedData;
-    
     // Calculate risk metrics
-    const riskMetrics = {
-      liquidityRisk: {
-        currentRatio: latest.currentAssets / latest.currentLiabilities || 0,
-        quickRatio: (latest.currentAssets - latest.inventory) / latest.currentLiabilities || 0,
-        workingCapital: latest.currentAssets - latest.currentLiabilities,
-        riskLevel: 'Low' // Will be calculated based on thresholds
-      },
-      solvencyRisk: {
-        debtToEquityRatio: latest.totalLiabilities / latest.totalEquity || 0,
-        debtToAssetRatio: latest.totalLiabilities / latest.totalAssets || 0,
-        equityRatio: latest.totalEquity / latest.totalAssets || 0,
-        riskLevel: 'Low'
-      },
-      operationalRisk: {
-        assetUtilization: latest.totalAssets > 0 ? 1 : 0,
-        inventoryTurnover: latest.inventory > 0 ? latest.currentAssets / latest.inventory : 0,
-        receivablesTurnover: latest.receivables > 0 ? latest.currentAssets / latest.receivables : 0
-      }
-    };
+    const riskMetrics = balanceSheets.map(sheet => {
+      const data = sheet.extractedData;
+      if (!data) return null;
 
-    // Determine risk levels
-    if (riskMetrics.liquidityRisk.currentRatio < 1) {
-      riskMetrics.liquidityRisk.riskLevel = 'High';
-    } else if (riskMetrics.liquidityRisk.currentRatio < 1.5) {
-      riskMetrics.liquidityRisk.riskLevel = 'Medium';
-    }
+      const currentAssets = data.balanceSheet?.currentAssets || 0;
+      const currentLiabilities = data.balanceSheet?.currentLiabilities || 1;
+      const totalLiabilities = data.balanceSheet?.totalLiabilities || 0;
+      const totalEquity = data.balanceSheet?.totalEquity || 1;
+      const totalAssets = data.balanceSheet?.totalAssets || 0;
 
-    if (riskMetrics.solvencyRisk.debtToEquityRatio > 2) {
-      riskMetrics.solvencyRisk.riskLevel = 'High';
-    } else if (riskMetrics.solvencyRisk.debtToEquityRatio > 1) {
-      riskMetrics.solvencyRisk.riskLevel = 'Medium';
-    }
+      const currentRatio = currentAssets / currentLiabilities;
+      const debtToEquity = totalLiabilities / totalEquity;
+      const debtToAssets = totalLiabilities / totalAssets;
 
-    // Generate trend analysis if multiple years available
-    let trendAnalysis = null;
-    if (balanceSheets.length > 1) {
-      const trends = balanceSheets.map(bs => ({
-        year: bs.financialYear,
-        currentRatio: bs.extractedData.currentAssets / bs.extractedData.currentLiabilities || 0,
-        debtToEquityRatio: bs.extractedData.totalLiabilities / bs.extractedData.totalEquity || 0
-      }));
+      // Risk scoring
+      let liquidityRisk = 'Low';
+      if (currentRatio < 1) liquidityRisk = 'High';
+      else if (currentRatio < 1.5) liquidityRisk = 'Medium';
 
-      trendAnalysis = {
-        currentRatioTrend: trends.map(t => t.currentRatio),
-        debtToEquityTrend: trends.map(t => t.debtToEquityRatio),
-        years: trends.map(t => t.year)
+      let solvencyRisk = 'Low';
+      if (debtToEquity > 1) solvencyRisk = 'High';
+      else if (debtToEquity > 0.5) solvencyRisk = 'Medium';
+
+      let assetRisk = 'Low';
+      if (debtToAssets > 0.6) assetRisk = 'High';
+      else if (debtToAssets > 0.4) assetRisk = 'Medium';
+
+      return {
+        year: sheet.financialYear,
+        currentRatio,
+        debtToEquity,
+        debtToAssets,
+        liquidityRisk,
+        solvencyRisk,
+        assetRisk,
+        overallRisk: [liquidityRisk, solvencyRisk, assetRisk].filter(r => r === 'High').length > 1 ? 'High' : 
+                    [liquidityRisk, solvencyRisk, assetRisk].filter(r => r === 'Medium').length > 1 ? 'Medium' : 'Low'
       };
-    }
+    }).filter(Boolean);
 
     res.json({
       success: true,
       data: {
-        riskMetrics,
-        trendAnalysis,
-        year: balanceSheets[0].financialYear,
-        company: balanceSheets[0].company
+        riskMetrics
       }
     });
   } catch (error) {
-    console.error('Risk assessment error:', error);
+    console.error('Get risk assessment error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to generate risk assessment',
+      message: 'Failed to get risk assessment',
       error: error.message
     });
   }
 });
 
-// @desc    Generate comprehensive financial report
-// @route   POST /api/analysis/report
+// @desc    Get comprehensive financial analysis
+// @route   GET /api/analysis/comprehensive/:balanceSheetId
 // @access  Private
-router.post('/report', protect, async (req, res) => {
+router.get('/comprehensive/:balanceSheetId', protect, async (req, res) => {
   try {
-    const { companyId, year, includeCharts = true, includeRecommendations = true } = req.body;
+    const { balanceSheetId } = req.params;
 
-    // Validate company access
-    const company = await Company.findById(companyId);
-    if (!company) {
-      return res.status(404).json({
-        success: false,
-        message: 'Company not found'
-      });
-    }
-
-    // Check if user has access to this company
-    if (req.user.role !== 'Group Executive' && 
-        req.user.company.toString() !== companyId && 
-        req.user.parentCompany?.toString() !== companyId) {
-      return res.status(403).json({
-        success: false,
-        message: 'Access denied to this company'
-      });
-    }
-
-    // Get balance sheet data
-    const balanceSheet = await BalanceSheet.findOne({
-      company: companyId,
-      financialYear: year
-    });
+    const balanceSheet = await BalanceSheet.findById(balanceSheetId)
+      .populate('company', 'name industry');
 
     if (!balanceSheet) {
       return res.status(404).json({
         success: false,
-        message: 'Balance sheet not found for the specified year'
+        message: 'Balance sheet not found'
       });
     }
 
-    // Generate comprehensive analysis
-    const analysis = await analyzeFinancialData(balanceSheet.extractedData);
+    // Check if user has access to this balance sheet
+    if (req.user.role !== 'Group Executive' && 
+        req.user.company.toString() !== balanceSheet.company._id.toString() && 
+        req.user.parentCompany?.toString() !== balanceSheet.company._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied to this balance sheet'
+      });
+    }
 
-    const report = {
-      company: company.name,
-      year: balanceSheet.financialYear,
-      period: balanceSheet.period,
-      generatedAt: new Date(),
-      generatedBy: req.user.fullName,
-      data: balanceSheet.extractedData,
-      analysis: analysis.analysis,
-      keyInsights: analysis.keyInsights,
-      riskFactors: analysis.riskFactors,
-      recommendations: analysis.recommendations,
-      includeCharts,
-      includeRecommendations
-    };
+    // Calculate advanced metrics
+    const data = balanceSheet.extractedData;
+    const advancedMetrics = calculateAdvancedMetrics(data);
+    const industryBenchmark = generateIndustryBenchmark(advancedMetrics);
+    const riskAssessment = assessRiskProfile(advancedMetrics);
 
     res.json({
       success: true,
-      message: 'Financial report generated successfully',
       data: {
-        report
+        balanceSheet: {
+          id: balanceSheet._id,
+          year: balanceSheet.financialYear,
+          company: balanceSheet.company.name,
+          industry: balanceSheet.company.industry
+        },
+        advancedMetrics,
+        industryBenchmark,
+        riskAssessment,
+        analysis: balanceSheet.analysis
       }
     });
   } catch (error) {
-    console.error('Generate report error:', error);
+    console.error('Comprehensive analysis error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to generate financial report',
+      message: 'Failed to generate comprehensive analysis',
       error: error.message
     });
   }
 });
+
+// @desc    Get industry benchmarking analysis
+// @route   GET /api/analysis/benchmark/:companyId
+// @access  Private
+router.get('/benchmark/:companyId', protect, async (req, res) => {
+  try {
+    const { companyId } = req.params;
+
+    const balanceSheets = await BalanceSheet.find({ company: companyId })
+      .populate('company', 'name industry')
+      .sort({ financialYear: -1 })
+      .limit(3);
+
+    if (balanceSheets.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'No balance sheets found for benchmarking'
+      });
+    }
+
+    // Calculate metrics for each year
+    const benchmarkData = balanceSheets.map(sheet => {
+      const metrics = calculateAdvancedMetrics(sheet.extractedData);
+      return {
+        year: sheet.financialYear,
+        metrics,
+        industryBenchmark: generateIndustryBenchmark(metrics)
+      };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        company: balanceSheets[0].company.name,
+        industry: balanceSheets[0].company.industry,
+        benchmarkData,
+        trends: calculateBenchmarkTrends(benchmarkData)
+      }
+    });
+  } catch (error) {
+    console.error('Benchmark analysis error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate benchmark analysis',
+      error: error.message
+    });
+  }
+});
+
+// @desc    Get advanced financial metrics
+// @route   GET /api/analysis/metrics/:balanceSheetId
+// @access  Private
+router.get('/metrics/:balanceSheetId', protect, async (req, res) => {
+  try {
+    const { balanceSheetId } = req.params;
+
+    const balanceSheet = await BalanceSheet.findById(balanceSheetId)
+      .populate('company', 'name');
+
+    if (!balanceSheet) {
+      return res.status(404).json({
+        success: false,
+        message: 'Balance sheet not found'
+      });
+    }
+
+    const metrics = calculateAdvancedMetrics(balanceSheet.extractedData);
+
+    res.json({
+      success: true,
+      data: {
+        metrics,
+        balanceSheet: {
+          id: balanceSheet._id,
+          year: balanceSheet.financialYear,
+          company: balanceSheet.company.name
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Metrics analysis error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to calculate advanced metrics',
+      error: error.message
+    });
+  }
+});
+
+// Helper functions for advanced analysis
+const calculateAdvancedMetrics = (data) => {
+  const bs = data.balanceSheet || {};
+  const is = data.incomeStatement || {};
+  
+  const totalAssets = bs.totalAssets || 1;
+  const currentAssets = bs.currentAssets || 0;
+  const currentLiabilities = bs.currentLiabilities || 1;
+  const totalLiabilities = bs.totalLiabilities || 0;
+  const totalEquity = bs.totalEquity || 1;
+  const inventory = bs.inventory || 0;
+  const cashAndEquivalents = bs.cashAndEquivalents || 0;
+  const receivables = bs.receivables || 0;
+  const revenue = is.revenue || 0;
+  const netProfit = is.netProfit || 0;
+  const grossProfit = is.grossProfit || 0;
+  const costOfGoodsSold = is.costOfGoodsSold || 1;
+  const payables = bs.tradePayables || 0;
+  
+  return {
+    // Liquidity Ratios
+    currentRatio: currentAssets / currentLiabilities,
+    quickRatio: (currentAssets - inventory) / currentLiabilities,
+    cashRatio: cashAndEquivalents / currentLiabilities,
+    
+    // Solvency Ratios
+    debtToEquity: totalLiabilities / totalEquity,
+    debtToAssets: totalLiabilities / totalAssets,
+    equityRatio: totalEquity / totalAssets,
+    
+    // Efficiency Ratios
+    assetTurnover: revenue / totalAssets,
+    inventoryTurnover: costOfGoodsSold / inventory,
+    receivablesTurnover: revenue / receivables,
+    fixedAssetTurnover: revenue / (bs.propertyPlantEquipment || 1),
+    
+    // Profitability Ratios
+    roa: netProfit / totalAssets,
+    roe: netProfit / totalEquity,
+    grossMargin: grossProfit / revenue,
+    netMargin: netProfit / revenue,
+    
+    // Working Capital Metrics
+    workingCapital: currentAssets - currentLiabilities,
+    workingCapitalRatio: (currentAssets - currentLiabilities) / totalAssets,
+    
+    // Cash Flow Metrics
+    cashConversionCycle: calculateCashConversionCycle(data),
+    
+    // Days Metrics
+    daysSalesOutstanding: (receivables / revenue) * 365,
+    daysInventoryOutstanding: (inventory / costOfGoodsSold) * 365,
+    daysPayablesOutstanding: (payables / costOfGoodsSold) * 365
+  };
+};
+
+const calculateCashConversionCycle = (data) => {
+  const bs = data.balanceSheet || {};
+  const is = data.incomeStatement || {};
+  
+  const receivables = bs.receivables || 0;
+  const inventory = bs.inventory || 0;
+  const payables = bs.tradePayables || 0;
+  const revenue = is.revenue || 1;
+  const costOfGoodsSold = is.costOfGoodsSold || 1;
+  
+  const dso = (receivables / revenue) * 365;
+  const dio = (inventory / costOfGoodsSold) * 365;
+  const dpo = (payables / costOfGoodsSold) * 365;
+  
+  return dso + dio - dpo;
+};
+
+const generateIndustryBenchmark = (metrics) => {
+  // Mock industry averages (in real implementation, these would come from industry databases)
+  const industryAverages = {
+    currentRatio: 1.8,
+    debtToEquity: 0.6,
+    roa: 0.08,
+    roe: 0.12,
+    assetTurnover: 1.2,
+    netMargin: 0.10
+  };
+  
+  return {
+    currentRatio: { 
+      company: metrics.currentRatio, 
+      industry: industryAverages.currentRatio, 
+      status: metrics.currentRatio > industryAverages.currentRatio ? 'Above Industry' : 'Below Industry' 
+    },
+    debtToEquity: { 
+      company: metrics.debtToEquity, 
+      industry: industryAverages.debtToEquity, 
+      status: metrics.debtToEquity < industryAverages.debtToEquity ? 'Above Industry' : 'Below Industry' 
+    },
+    roa: { 
+      company: metrics.roa, 
+      industry: industryAverages.roa, 
+      status: metrics.roa > industryAverages.roa ? 'Above Industry' : 'Below Industry' 
+    },
+    roe: { 
+      company: metrics.roe, 
+      industry: industryAverages.roe, 
+      status: metrics.roe > industryAverages.roe ? 'Above Industry' : 'Below Industry' 
+    },
+    assetTurnover: { 
+      company: metrics.assetTurnover, 
+      industry: industryAverages.assetTurnover, 
+      status: metrics.assetTurnover > industryAverages.assetTurnover ? 'Above Industry' : 'Below Industry' 
+    },
+    netMargin: { 
+      company: metrics.netMargin, 
+      industry: industryAverages.netMargin, 
+      status: metrics.netMargin > industryAverages.netMargin ? 'Above Industry' : 'Below Industry' 
+    }
+  };
+};
+
+const assessRiskProfile = (metrics) => {
+  let creditworthiness = 'Investment Grade';
+  let financialFlexibility = 'High';
+  let riskProfile = 'Low';
+  let growthPotential = 'Strong';
+  
+  // Assess creditworthiness
+  if (metrics.currentRatio < 1.5) creditworthiness = 'Speculative Grade';
+  if (metrics.debtToEquity > 1) creditworthiness = 'High Yield';
+  
+  // Assess financial flexibility
+  if (metrics.cashRatio < 0.2) financialFlexibility = 'Moderate';
+  if (metrics.cashRatio < 0.1) financialFlexibility = 'Low';
+  
+  // Assess risk profile
+  if (metrics.debtToEquity > 0.8) riskProfile = 'Moderate';
+  if (metrics.debtToEquity > 1.2) riskProfile = 'High';
+  
+  // Assess growth potential
+  if (metrics.roa < 0.05) growthPotential = 'Moderate';
+  if (metrics.roa < 0.02) growthPotential = 'Limited';
+  
+  return {
+    creditworthiness,
+    financialFlexibility,
+    riskProfile,
+    growthPotential,
+    keyStrengths: [
+      'Strong liquidity position',
+      'Healthy capital structure',
+      'Good operational efficiency'
+    ],
+    areasOfConcern: [
+      'Monitor debt levels',
+      'Watch for market volatility',
+      'Ensure adequate cash reserves'
+    ]
+  };
+};
+
+const calculateBenchmarkTrends = (benchmarkData) => {
+  if (benchmarkData.length < 2) return {};
+  
+  const trends = {};
+  for (let i = 1; i < benchmarkData.length; i++) {
+    const current = benchmarkData[i];
+    const previous = benchmarkData[i - 1];
+    
+    trends[`${previous.year}-${current.year}`] = {
+      roaChange: ((current.metrics.roa - previous.metrics.roa) / previous.metrics.roa) * 100,
+      debtToEquityChange: ((current.metrics.debtToEquity - previous.metrics.debtToEquity) / previous.metrics.debtToEquity) * 100,
+      currentRatioChange: ((current.metrics.currentRatio - previous.metrics.currentRatio) / previous.metrics.currentRatio) * 100
+    };
+  }
+  
+  return trends;
+};
 
 module.exports = router;

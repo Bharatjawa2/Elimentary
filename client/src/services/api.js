@@ -142,10 +142,23 @@ export const chatAPI = {
   
   getById: (id) => apiRequest(`/chat/${id}`),
   
-  sendMessage: (id, message) => apiRequest(`/chat/${id}/message`, {
-    method: 'POST',
-    body: JSON.stringify({ message }),
-  }),
+  sendMessage: (id, message) => {
+    const token = localStorage.getItem('token');
+    return fetch(`${API_BASE_URL}/chat/${id}/message`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ message }),
+    }).then(async response => {
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || 'Failed to send message');
+      }
+      return data;
+    });
+  },
   
   updateSettings: (id, settings) => apiRequest(`/chat/${id}/settings`, {
     method: 'PUT',
@@ -180,6 +193,12 @@ export const analysisAPI = {
   getGrowth: (companyId) => apiRequest(`/analysis/growth/${companyId}`),
   
   getRisk: (companyId) => apiRequest(`/analysis/risk/${companyId}`),
+  
+  getComprehensive: (balanceSheetId) => apiRequest(`/analysis/comprehensive/${balanceSheetId}`),
+  
+  getBenchmark: (companyId) => apiRequest(`/analysis/benchmark/${companyId}`),
+  
+  getMetrics: (balanceSheetId) => apiRequest(`/analysis/metrics/${balanceSheetId}`),
 };
 
 // Users API

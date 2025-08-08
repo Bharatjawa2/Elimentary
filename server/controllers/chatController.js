@@ -201,13 +201,19 @@ const sendMessage = async (req, res) => {
       await chat.save();
     }
 
+    // Get the updated chat with new messages
+    const updatedChat = await Chat.findById(chatId)
+      .populate('company', 'name')
+      .populate('context.balanceSheets', 'financialYear extractedData analysis');
+
     res.json({
       success: true,
       message: SUCCESS_MESSAGES.MESSAGE_SENT,
       data: {
-        userMessage: chat.messages[chat.messages.length - 2],
-        aiResponse: chat.messages[chat.messages.length - 1],
-        chatTitle: chat.title
+        userMessage: updatedChat.messages[updatedChat.messages.length - 2],
+        aiResponse: updatedChat.messages[updatedChat.messages.length - 1],
+        chatTitle: updatedChat.title,
+        chat: updatedChat
       }
     });
   } catch (error) {

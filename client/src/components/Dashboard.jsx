@@ -17,11 +17,13 @@ import {
   AlertCircle,
   CheckCircle,
   Clock,
-  RefreshCw
+  RefreshCw,
+  GitCompare
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell, AreaChart, Area } from 'recharts';
 import { balanceSheetsAPI, chatAPI, companiesAPI } from '../services/api';
 import BalanceSheetAnalysis from './BalanceSheetAnalysis';
+import BalanceSheetComparison from './BalanceSheetComparison';
 
 const Dashboard = () => {
   const { user, logout } = useAuth();
@@ -38,6 +40,7 @@ const Dashboard = () => {
   const [processingBalanceSheet, setProcessingBalanceSheet] = useState(null);
   const [selectedBalanceSheet, setSelectedBalanceSheet] = useState(null);
   const [showAnalysis, setShowAnalysis] = useState(false);
+  const [showComparison, setShowComparison] = useState(false);
 
   useEffect(() => {
     loadDashboardData();
@@ -286,13 +289,32 @@ const Dashboard = () => {
       console.log('Chat API response:', response);
       
       // Update chat with AI response
-      setCurrentChat(prev => ({
-        ...prev,
-        messages: [...(prev.messages || []), response.data.aiResponse]
-      }));
+      if (response.data && response.data.aiResponse) {
+        setCurrentChat(prev => ({
+          ...prev,
+          messages: [...(prev.messages || []), response.data.aiResponse]
+        }));
+      } else {
+        // Handle case where response structure is different
+        const aiResponse = {
+          role: 'assistant',
+          content: response.message || 'AI response received',
+          timestamp: new Date()
+        };
+        setCurrentChat(prev => ({
+          ...prev,
+          messages: [...(prev.messages || []), aiResponse]
+        }));
+      }
     } catch (error) {
       console.error('Error sending message:', error);
       alert('Failed to send message: ' + error.message);
+      
+      // Remove the user message if sending failed
+      setCurrentChat(prev => ({
+        ...prev,
+        messages: prev.messages?.slice(0, -1) || []
+      }));
     }
   };
 
@@ -457,6 +479,7 @@ const Dashboard = () => {
               { id: 'overview', name: 'Overview', icon: BarChart3 },
               { id: 'upload', name: 'Upload Data', icon: Upload },
               { id: 'chat', name: 'AI Assistant', icon: MessageSquare },
+              { id: 'comparison', name: 'Compare Sheets', icon: GitCompare },
               { id: 'reports', name: 'Reports', icon: FileText },
             ].map((tab) => {
               const Icon = tab.icon;
@@ -803,6 +826,68 @@ const Dashboard = () => {
           </div>
         )}
 
+        {activeTab === 'comparison' && (
+          <div className="bg-white p-6 rounded-lg shadow">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h3 className="text-lg font-medium text-gray-900">Balance Sheet Comparison</h3>
+                <p className="text-gray-600">Compare multiple balance sheets for comprehensive analysis</p>
+              </div>
+              <button
+                onClick={() => setShowComparison(true)}
+                disabled={balanceSheets.length < 2}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+              >
+                <GitCompare className="w-4 h-4 mr-2" />
+                Compare Sheets
+              </button>
+            </div>
+
+            {balanceSheets.length < 2 ? (
+              <div className="text-center py-12">
+                <GitCompare className="mx-auto h-12 w-12 text-gray-400" />
+                <h3 className="mt-2 text-sm font-medium text-gray-900">Need Multiple Sheets</h3>
+                <p className="mt-1 text-sm text-gray-500">
+                  Upload at least 2 balance sheets to enable comparison analysis.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {balanceSheets.map((sheet) => (
+                    <div key={sheet._id} className="border rounded-lg p-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="font-medium text-gray-900">{sheet.financialYear}</h4>
+                        <span className="text-sm text-gray-500">{sheet.period}</span>
+                      </div>
+                      <div className="space-y-2 text-sm">
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">Assets:</span>
+                          <span className="font-medium">
+                            ₹{(sheet.extractedData?.balanceSheet?.totalAssets || 0).toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">Liabilities:</span>
+                          <span className="font-medium">
+                            ₹{(sheet.extractedData?.balanceSheet?.totalLiabilities || 0).toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-gray-600">Equity:</span>
+                          <span className="font-medium">
+                            ₹{(sheet.extractedData?.balanceSheet?.totalEquity || 0).toLocaleString()}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {activeTab === 'reports' && (
           <div className="space-y-6">
             <div className="bg-white p-6 rounded-lg shadow">
@@ -870,6 +955,14 @@ const Dashboard = () => {
               setShowAnalysis(false);
               setSelectedBalanceSheet(null);
             }}
+          />
+        )}
+
+        {/* Balance Sheet Comparison Modal */}
+        {showComparison && (
+          <BalanceSheetComparison
+            balanceSheets={balanceSheets}
+            onClose={() => setShowComparison(false)}
           />
         )}
       </div>
