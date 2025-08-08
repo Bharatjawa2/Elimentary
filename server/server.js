@@ -26,7 +26,8 @@ app.use(cors({
       'http://localhost:5174', 
       'http://localhost:3000',
       'http://localhost:5175',
-      'http://localhost:5176'
+      'http://localhost:5176',
+      'https://elimentary-hls5.vercel.app'
     ];
     
     if (allowedOrigins.indexOf(origin) !== -1) {
