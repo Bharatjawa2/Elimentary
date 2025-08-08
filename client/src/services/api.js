@@ -1,4 +1,4 @@
-const API_BASE_URL = 'http://localhost:5001/api';
+const API_BASE_URL = 'https://elimentary-backend.onrender.com/api';
 
 // Helper function to handle API requests
 const apiRequest = async (endpoint, options = {}) => {
